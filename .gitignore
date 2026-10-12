@@ -1,0 +1,28 @@
+# runtime and secrets (never committed, never packaged)
+backend/data/
+*.cred
+*.sealed.local
+.env
+.env.*
+
+# local development tooling (portable PostgreSQL, downloads)
+.devtools/
+
+# environments and build output
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+frontend/dist/
+dist/
+deploy/
+
+# editor and OS
+.vscode/
+.idea/
+Thumbs.db
+
+# test evidence and local artefacts
+frontend/e2e/results/
+backend/config/owner.sealed
