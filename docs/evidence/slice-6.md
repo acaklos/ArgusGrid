@@ -74,7 +74,7 @@ indication, not a proof; the test bound is a ratio between 0.5 and 2.0.
 | NVD paging and API keys for large ranges | one request per run |
 | SMTP over STARTTLS or SSL against a real server | tested against a local sink only |
 | Hardened container form for the defense profile (no outbound network) | the Windows package is the only form built |
-| PostgreSQL installation by the setup | by decision AG-D-64 the operator provides the database |
+| PostgreSQL installation by the setup | production package: by decision AG-D-64 the operator provides the database. Demo package: done, see "Addendum: tools bootstrap" |
 | Code signing of the archive | a SHA-256 file is written, nothing is signed |
 | The markings, retention and exposure radii of the defense profile are proposals | to be set by the customer; no accreditation or certification is claimed |
 | The clean install ran on the development machine (Python and PostgreSQL were already present, network for pip) | a pristine machine run is still to be done for the TRL 7 evidence package |
@@ -110,3 +110,35 @@ so page breaks, the table of contents (a field that Word refreshes on opening) a
 not seen. They should be opened and checked once in Word before they are handed over. Texts that come from
 sensors and feeds, the names of e-mail templates and the descriptions of roles are shown by the application in
 English; the manuals say so.
+
+## Addendum: tools bootstrap for the demo package (AG-D-70)
+
+Date: 2026-10-13. Request: the demo should be ready to use after one installation, without a prepared database.
+
+| Check | Evidence | Result |
+|-------|----------|--------|
+| Backend tests | `pytest` (whole suite) | **299 passed** (4 new in `test_deploy_scan.py`: demo-only bootstrap file, pin format and host list, script parsing, checksum check) |
+| Clean install with no database given, demo package, defense profile | `clean_install_proof.py --package demo --profile defense --bootstrap --local-cache <folder>` | **33 of 33 checks passed** |
+| Real download path | first run without cache: Python, pip and PostgreSQL archives were downloaded and accepted by their SHA-256, unpacked, requirements installed | worked up to the cluster start (found the defect below); the repeat used the verified local copies |
+
+What the proof exercised: embedded Python used, no virtual environment; only `bin`, `lib`, `share` of the PostgreSQL
+archive unpacked (no administration tool); cluster on 127.0.0.1 at port 54340; database URL stored only in
+`backend\data\database.url`; setup removed itself; start started the cluster; login, forced password change and the
+demo site worked; stop ended the application and the cluster; nothing but the expected top-level items was left.
+
+Defects found and fixed:
+
+| Finding | Fix |
+|---------|-----|
+| `pip install` of the pinned wheel through the wheel itself refused ("to modify pip, run python -m pip") | the pure-Python wheel is unpacked into `site-packages` |
+| `Start-Process -Wait` on `pg_ctl start` never returned, because it also waits for the server that pg_ctl leaves running (setup hung) | one helper waits for the single process; output goes to files |
+
+How the pins were obtained: the pip wheel hash is the digest published by the package index. The Python and
+PostgreSQL archives were downloaded once and hashed here (the vendors' download pages were not used as a
+cross-check): the values prove that later downloads are the same files, not that the vendor's first file was
+authentic. Review the pins before a release.
+
+Not verified: a machine without Python or without the Visual C++ runtime (the proof ran on the development machine
+with `-EmbeddedPython`; the missing-runtime path only copies the DLLs of the embedded Python and checks that
+`postgres.exe --version` runs); an offline install end to end (pip still needs the package index); proxies and
+virus scanners that block the download; running two installations on one machine at the same time.

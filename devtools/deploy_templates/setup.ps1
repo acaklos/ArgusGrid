@@ -9,6 +9,13 @@
 .PARAMETER WithDemo    Load the fictional demonstration site (only offered by the demo package).
 .PARAMETER DatabaseUrl PostgreSQL 16 URL of an existing, empty database, for example
                        postgresql+psycopg://argusgrid:<password>@localhost:5432/argusgrid
+.PARAMETER EmbeddedPython  Demo package: use the downloaded embedded Python even when Python 3.12 is installed.
+.PARAMETER LocalCache  Demo package: folder that already holds the pinned downloads (offline install). The
+                       same SHA-256 check applies.
+
+  Demo package (bootstrap.ps1 present): without -DatabaseUrl the setup installs a PostgreSQL 16 cluster that
+  belongs to this folder (runtime\pgsql, runtime\pgdata, 127.0.0.1 only) and, when Python 3.12 is missing, an
+  embedded Python (runtime\python). Both come from fixed addresses and are checked against pinned SHA-256 values.
 
   After a fully successful setup this script and setup.bat delete themselves. Download the package again to run
   the setup once more. Nothing is deleted after a failed or partial run, -CheckOnly or -DryRun.
@@ -19,6 +26,8 @@ param(
     [switch]$DryRun,
     [switch]$AssumeYes,
     [switch]$WithDemo,
+    [switch]$EmbeddedPython,
+    [string]$LocalCache = '',
     [string]$DatabaseUrl = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -37,8 +46,13 @@ function Step([string]$text) { Write-Host ('  - ' + $text) }
 # -- prerequisites ------------------------------------------------------------------------------------
 Say 'ArgusGrid setup'
 Say ''
+$Bootstrap = Join-Path $Root 'bootstrap.ps1'
+$canBootstrap = Test-Path $Bootstrap
+if ($canBootstrap) { . $Bootstrap }
+if ($LocalCache) { $LocalCache = [System.IO.Path]::GetFullPath($LocalCache) }
 $python = $null
-foreach ($candidate in @(@('py', '-3.12'), @('python'), @('python3'))) {
+$candidates = if ($EmbeddedPython) { @() } else { @(@('py', '-3.12'), @('python'), @('python3')) }
+foreach ($candidate in $candidates) {
     try {
         $exe = $candidate[0]
         $extra = @($candidate | Select-Object -Skip 1)
@@ -50,20 +64,45 @@ foreach ($candidate in @(@('py', '-3.12'), @('python'), @('python3'))) {
         }
     } catch { }
 }
-if ($python) { Step ('Python ' + $python.Version + ' found') } else { Step 'Python 3.12 or newer: MISSING'; $blockers.Add('Install Python 3.12 or newer from python.org and run setup again.') }
+$useEmbedded = $false
+if ($python) { Step ('Python ' + $python.Version + ' found') }
+elseif ($canBootstrap) { $useEmbedded = $true; Step 'Python 3.12 or newer: the embedded Python will be downloaded into runtime\python' }
+else { Step 'Python 3.12 or newer: MISSING'; $blockers.Add('Install Python 3.12 or newer from python.org and run setup again.') }
 
 if (-not $DatabaseUrl) { $DatabaseUrl = $env:ARGUS_DATABASE_URL }
 $urlFile = Join-Path $DataDir 'database.url'
 if (-not $DatabaseUrl -and (Test-Path $urlFile)) { $DatabaseUrl = (Get-Content $urlFile -Raw).Trim() }
-if (-not $DatabaseUrl -and -not $CheckOnly -and -not $DryRun -and -not $AssumeYes) {
+$bundled = $false
+if (-not $DatabaseUrl -and $canBootstrap) {
+    $bundled = $true
+    if (-not $CheckOnly -and -not $DryRun -and -not $AssumeYes) {
+        Say ''
+        Say 'No database was given. This package can install its own PostgreSQL 16 (about 311 MB download, kept in runtime\,'
+        Say 'listening on 127.0.0.1 only). Answer n to use an existing PostgreSQL 16 database instead.'
+        $answer = Read-Host 'Install the bundled PostgreSQL? (Y/n)'
+        if ($answer -match '^(n|no|nie)$') { $bundled = $false }
+    }
+}
+if (-not $DatabaseUrl -and -not $bundled -and -not $CheckOnly -and -not $DryRun -and -not $AssumeYes) {
     Say ''
     Say 'PostgreSQL 16 is required. Create an empty database and a role for it first, then enter the URL.'
     Say 'Example: postgresql+psycopg://argusgrid:<password>@localhost:5432/argusgrid'
     $DatabaseUrl = (Read-Host 'Database URL').Trim()
 }
 if ($DatabaseUrl -match '^postgresql(\+psycopg)?://') { Step 'Database URL given' }
+elseif ($bundled) { Step 'Database: the bundled PostgreSQL 16 will be installed into runtime\pgsql (127.0.0.1 only)' }
 else { Step 'Database URL: MISSING or not a PostgreSQL URL'; $blockers.Add('Provide -DatabaseUrl (PostgreSQL 16, existing empty database).') }
 if ($DatabaseUrl -match '^postgresql://') { $DatabaseUrl = $DatabaseUrl -replace '^postgresql://', 'postgresql+psycopg://' }
+
+if ($canBootstrap) {
+    $needed = @()
+    if ($useEmbedded) { $needed += 'python', 'pip' }
+    if ($bundled -and -not (Test-Path (Join-Path (Get-PgBin $Root) 'postgres.exe'))) { $needed += 'postgres' }
+    foreach ($key in $needed) {
+        if (Test-PinnedAvailable $Root $key $LocalCache) { Step ('download source reachable or cached: ' + $script:Pins[$key].File) }
+        else { Step ('not available: ' + $script:Pins[$key].File); $blockers.Add('Cannot reach ' + $script:Pins[$key].Url + ' and the file is not in runtime\cache or -LocalCache. Put the file there and run setup again.') }
+    }
+}
 
 if ($WithDemo -and -not (Test-Path (Join-Path $Backend 'app\tools\demo_data.py'))) { $blockers.Add('-WithDemo: this package has no demonstration data (production package).') }
 if (-not (Test-Path (Join-Path $Backend 'app\main.py'))) { $blockers.Add('backend\app is missing: the package is incomplete.') }
@@ -79,14 +118,22 @@ if ($blockers.Count -gt 0) {
 if ($CheckOnly) { Say 'Check finished: all prerequisites are present.'; exit 0 }
 
 # -- plan ---------------------------------------------------------------------------------------------
-$pyDisplay = ($python.Exe + ' ' + ($python.Args -join ' ')).Trim()
-$plan = @(
-    "$pyDisplay -m venv `"$Venv`"",
-    "`"$VenvPy`" -m pip install --disable-pip-version-check -r backend\requirements.txt",
-    'write backend\data\database.url (database URL, not shown again)',
-    'write backend\config\app.env if missing (production defaults)',
-    "`"$VenvPy`" -m app.tools.prepare_database   (schema, roles, initial administrator)"
-)
+$plan = @()
+if ($useEmbedded) {
+    $VenvPy = Get-EmbeddedPython $Root
+    $plan += 'download the embedded Python 3.12 and pip, check SHA-256, unpack into runtime\python'
+} else {
+    $pyDisplay = ($python.Exe + ' ' + ($python.Args -join ' ')).Trim()
+    $plan += "$pyDisplay -m venv `"$Venv`""
+}
+$plan += "`"$VenvPy`" -m pip install --disable-pip-version-check -r backend\requirements.txt   (from the Python package index)"
+if ($bundled) {
+    $plan += 'download PostgreSQL 16 (about 311 MB), check SHA-256, unpack bin, lib and share into runtime\pgsql'
+    $plan += 'create the cluster runtime\pgdata (127.0.0.1, free port from 54340), an application role and an empty database'
+}
+$plan += 'write backend\data\database.url (database URL, not shown again)'
+$plan += 'write backend\config\app.env if missing (production defaults)'
+$plan += "`"$VenvPy`" -m app.tools.prepare_database   (schema, roles, initial administrator)"
 if ($WithDemo) { $plan += "`"$VenvPy`" -m app.tools.demo_data create   (fictional demonstration site)" }
 Say 'Plan:'
 $plan | ForEach-Object { Step $_ }
@@ -98,14 +145,28 @@ if (-not $AssumeYes) {
 
 # -- run ----------------------------------------------------------------------------------------------
 try {
-    if (-not (Test-Path $VenvPy)) {
+    if ($useEmbedded) {
+        $VenvPy = Install-EmbeddedPython $Root $LocalCache
+    } elseif (-not (Test-Path $VenvPy)) {
         & $python.Exe @($python.Args) -m venv $Venv
         if ($LASTEXITCODE -ne 0) { throw 'creating the virtual environment failed' }
     }
-    & $VenvPy -m pip install --disable-pip-version-check -r (Join-Path $Backend 'requirements.txt')
+    & $VenvPy -m pip install --disable-pip-version-check --no-warn-script-location -r (Join-Path $Backend 'requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw 'installing the requirements failed' }
 
     New-Item -ItemType Directory -Force $DataDir, $ConfigDir | Out-Null
+    if ($bundled) {
+        Install-Postgres $Root $LocalCache | Out-Null
+        if (Test-Path $urlFile) {
+            # repeated run: the cluster and its URL already exist
+            if (-not (Test-BundledCluster $Root)) { throw 'backend\data\database.url exists but runtime\pgdata does not; delete the file to start over' }
+            Start-Cluster $Root
+        } else {
+            $DatabaseUrl = Initialize-Cluster $Root
+        }
+    } elseif ($canBootstrap -and (Test-BundledCluster $Root)) {
+        Start-Cluster $Root   # a repeated run: the bundled cluster of this folder may be stopped
+    }
     if (-not (Test-Path $urlFile)) {
         [System.IO.File]::WriteAllText($urlFile, $DatabaseUrl)
         # only the current user may read the file with the database password

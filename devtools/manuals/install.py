@@ -63,6 +63,20 @@ def build(screens: Path, out: Path) -> None:
 CREATE DATABASE argusgrid OWNER argusgrid;""")
     m.p("Adresa pre setup má tvar:")
     m.code("postgresql+psycopg://argusgrid:<heslo>@localhost:5432/argusgrid")
+    m.h(2, "2.4 Balík demo: vlastná databáza a Python")
+    m.p("Balík **demo** obsahuje aj súbor `bootstrap.ps1`. Ak pri spustení `setup.bat` nezadáte `-DatabaseUrl`, "
+        "setup nainštaluje PostgreSQL 16 do priečinka `runtime\\` (stiahne približne 311 MB; z archívu sa rozbalí iba "
+        "server, bez správcovského nástroja) a, ak nie je nainštalovaný Python 3.12 alebo zadáte `-EmbeddedPython`, "
+        "aj vložený Python. Databáza počúva iba na adrese 127.0.0.1 a jej heslá sú náhodné.")
+    m.bullets([
+        "Súbory sa preberajú z pevných adries (python.org, files.pythonhosted.org, get.enterprisedb.com) a akceptujú "
+        "sa iba vtedy, ak sa ich SHA-256 zhoduje s hodnotou zapísanou v `bootstrap.ps1`; inak sa zmažú a setup sa zastaví.",
+        "Bez prístupu na internet vložte súbory do `runtime\\cache` alebo zadajte `-LocalCache <priečinok>`. "
+        "Inštalácia požiadaviek aplikácie (pip) však stále potrebuje index balíkov Pythonu.",
+        "`start.bat` spustí aj databázu tohto priečinka, `stop.bat` ju zastaví (voľba `-KeepDatabase` ju ponechá bežať). "
+        "Externá databáza sa nikdy nezastavuje.",
+        "Produkčný balík toto neobsahuje: databázu a Python poskytuje prevádzkovateľ.",
+    ])
 
     m.h(1, "3. Inštalácia")
     m.p("Otvorte PowerShell alebo príkazový riadok v priečinku balíka a spustite:")
@@ -71,8 +85,10 @@ CREATE DATABASE argusgrid OWNER argusgrid;""")
         ["-CheckOnly", "iba skontroluje predpoklady a nahlási ich; nič nemení"],
         ["-DryRun", "vypíše, čo by urobil; nič nemení"],
         ["-AssumeYes", "bez otázok (adresu databázy treba zadať)"],
-        ["-DatabaseUrl <adresa>", "adresa databázy; bez nej sa setup opýta"],
+        ["-DatabaseUrl <adresa>", "adresa databázy; bez nej sa setup opýta (balík demo ponúkne vlastnú databázu)"],
         ["-WithDemo", "načíta ukážkový objekt (iba balík demo)"],
+        ["-EmbeddedPython", "iba balík demo: použije stiahnutý vložený Python aj vtedy, keď je Python nainštalovaný"],
+        ["-LocalCache <priečinok>", "iba balík demo: priečinok s už stiahnutými súbormi (inštalácia bez internetu)"],
     ], [5.0, 12.0], mono_cols=(0,))
     m.p("Odporúčaný postup je spustiť najprv `-CheckOnly`, potom vlastnú inštaláciu. Setup:")
     m.numbered([

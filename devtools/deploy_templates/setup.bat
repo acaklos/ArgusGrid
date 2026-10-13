@@ -1,5 +1,6 @@
 @echo off
 rem ArgusGrid setup. Options are passed through: -CheckOnly  -DryRun  -AssumeYes  -WithDemo  -DatabaseUrl <url>
+rem   demo package only: -EmbeddedPython  -LocalCache <folder>
 rem After a fully successful setup this file deletes itself (the package must be downloaded again to repeat).
 setlocal
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" %*

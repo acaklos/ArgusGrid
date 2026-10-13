@@ -7,6 +7,13 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Backend = Join-Path $Root 'backend'
 $Py = Join-Path $Root '.venv\Scripts\python.exe'
+$Bootstrap = Join-Path $Root 'bootstrap.ps1'
+$ownDatabase = $false
+if (Test-Path $Bootstrap) {
+    . $Bootstrap
+    if (-not (Test-Path $Py) -and (Test-Path (Get-EmbeddedPython $Root))) { $Py = Get-EmbeddedPython $Root }
+    $ownDatabase = Test-BundledCluster $Root
+}
 $DataDir = Join-Path $Backend 'data'
 $PidFile = Join-Path $DataDir 'server.pid'
 if (-not (Test-Path $Py)) { throw 'The application is not set up. Run setup.bat first.' }
@@ -27,6 +34,11 @@ if (Test-Path $PidFile) {
     $existing = [int](Get-Content $PidFile -Raw)
     if (Get-Process -Id $existing -ErrorAction SilentlyContinue) { throw "ArgusGrid already runs (process $existing). Use stop.bat first." }
     Remove-Item $PidFile -Force
+}
+
+if ($ownDatabase) {
+    # the PostgreSQL cluster that setup installed into this folder (runtime\pgdata)
+    Start-Cluster $Root
 }
 
 Push-Location $Backend

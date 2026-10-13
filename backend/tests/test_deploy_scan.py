@@ -1,7 +1,11 @@
 """Publish scan and package generator (DEP-001..DEP-022, DEV-005, DEV-006)."""
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import shutil
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -113,6 +117,65 @@ def test_the_demo_package_keeps_the_demo_code_and_still_has_no_loginless(tmp_pat
     assert (app / "demo" / "krec.py").is_file() and (app / "tools" / "demo_data.py").is_file()
     assert not (app / "dev_loginless.py").exists()
     assert secret_scan.scan_tree(staging) == []
+
+
+BOOTSTRAP = ROOT / "devtools" / "deploy_templates" / "bootstrap.ps1"
+SCRIPTS = ("setup.ps1", "start.ps1", "stop.ps1", "bootstrap.ps1")
+
+
+def _powershell(command: str) -> subprocess.CompletedProcess[str]:
+    exe = shutil.which("powershell")
+    if exe is None:
+        pytest.skip("Windows PowerShell is not available")
+    return subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", command], capture_output=True,
+                          text=True, timeout=120)
+
+
+def test_only_the_demo_package_carries_the_bootstrap_script(tmp_path: Path):
+    """AG-D-70: the production package never installs tools; the operator provides Python and PostgreSQL."""
+    if not (ROOT / "frontend" / "dist" / "index.html").is_file():
+        pytest.skip("frontend/dist not built")
+    demo, _i, _s = make_deploy.stage(tmp_path / "d", "demo", "civil")
+    prod, _i, _s = make_deploy.stage(tmp_path / "p", "production", "civil")
+    assert (demo / "bootstrap.ps1").is_file() and not (prod / "bootstrap.ps1").exists()
+    assert secret_scan.scan_tree(demo) == []
+    assert "311 MB" in (demo / "INSTALL.txt").read_text("utf-8")
+    assert "311 MB" not in (prod / "INSTALL.txt").read_text("utf-8")
+
+
+def test_the_pinned_downloads_are_complete_fixed_https_addresses_with_a_checksum():
+    text = BOOTSTRAP.read_text("utf-8")
+    pins = re.findall(r"File = '([^']+)'.*?Url = '([^']+)'.*?Sha256 = '([^']+)'", text, flags=re.S)
+    assert {p[0].split("-")[0] for p in pins} == {"python", "pip", "postgresql"}
+    hosts = set(re.search(r"AllowedHosts = @\(([^)]*)\)", text).group(1).replace("'", "").replace(" ", "").split(","))
+    for file, url, digest in pins:
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), f"{file}: checksum is not set"
+        assert url.startswith("https://") and url.endswith("/" + file)
+        assert url.split("/")[2] in hosts
+    assert "__" not in "".join(p[2] for p in pins)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell scripts of the Windows package")
+def test_the_package_scripts_parse():
+    names = ", ".join(f"'{ROOT / 'devtools' / 'deploy_templates' / n}'" for n in SCRIPTS)
+    command = (f"foreach ($f in @({names})) {{ $e = $null; [void][System.Management.Automation.Language.Parser]"
+               "::ParseFile($f, [ref]$null, [ref]$e); if ($e) { $e | ForEach-Object { $f + ': ' + $_.Message }; exit 1 } }")
+    r = _powershell(command)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell scripts of the Windows package")
+def test_the_checksum_check_accepts_the_exact_file_only(tmp_path: Path):
+    good = tmp_path / "good.bin"
+    good.write_bytes(b"argusgrid")
+    digest = hashlib.sha256(b"argusgrid").hexdigest()
+    bad = tmp_path / "bad.bin"
+    bad.write_bytes(b"argusgrid!")
+    command = (f". '{BOOTSTRAP}'; "
+               f"$a = Test-Sha256 '{good}' '{digest.upper()}'; $b = Test-Sha256 '{bad}' '{digest}'; "
+               f"$c = Test-Sha256 '{tmp_path / 'missing.bin'}' '{digest}'; \"$a $b $c\"")
+    r = _powershell(command)
+    assert r.stdout.split() == ["True", "False", "False"], r.stdout + r.stderr
 
 
 def test_distributed_documents_do_not_describe_recovery_owner_or_development_modes(tmp_path: Path):

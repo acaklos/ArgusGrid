@@ -109,6 +109,14 @@ profile (offline intelligence only, marking, longer retention). The Emergency Ow
 once by `make_deploy.py` for the envelope and are not stored. On the target: `setup.bat` (options `-CheckOnly`,
 `-DryRun`, `-AssumeYes`, `-DatabaseUrl`, `-WithDemo`), then `start.bat` and `stop.bat`.
 
+The **production** package needs Python 3.12 and an empty PostgreSQL 16 database that the operator provides
+(AG-D-64). The **demo** package also carries `bootstrap.ps1` (AG-D-70): without `-DatabaseUrl` the setup downloads
+and unpacks PostgreSQL 16 (about 311 MB, only `bin`, `lib`, `share` are kept) into `runtime\` and, when Python 3.12 is
+missing or `-EmbeddedPython` is given, the embedded Python. Every file comes from a fixed https address and must match
+the SHA-256 pinned in `bootstrap.ps1`. Offline: put the files in `runtime\cache` or give `-LocalCache <folder>`
+(pip still needs the Python package index). `start.bat` starts and `stop.bat` stops the cluster of that folder
+(`-KeepDatabase` leaves it running). Proof: `clean_install_proof.py --package demo --bootstrap`.
+
 ## Manuals
 
 `docs/manual/ArgusGrid-Pouzivatelska-prirucka.docx` (user manual) and `ArgusGrid-Instalacna-prirucka.docx`

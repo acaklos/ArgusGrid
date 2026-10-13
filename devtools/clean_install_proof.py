@@ -85,7 +85,14 @@ def main() -> int:
     parser.add_argument("--profile", choices=["civil", "defense"], default="civil")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--bootstrap", action="store_true",
+                        help="demo package only: no database is prepared here; setup downloads the embedded "
+                             "Python and PostgreSQL 16 itself (AG-D-70)")
+    parser.add_argument("--local-cache", default="",
+                        help="folder with the pinned downloads, to avoid downloading them again (same SHA-256 check)")
     args = parser.parse_args()
+    if args.bootstrap and args.package != "demo":
+        parser.error("--bootstrap needs --package demo")
 
     py = ROOT / ".venv" / "Scripts" / "python.exe"
     work = Path(tempfile.mkdtemp(prefix="argus-proof-"))
@@ -115,37 +122,45 @@ def main() -> int:
     check("extracted package passes the publish scan", secret_scan.scan_tree(install) == [])
 
     # 3. database ---------------------------------------------------------------------------------------
-    dev_url = (ROOT / "backend" / "data" / "database.url").read_text(encoding="utf-8").strip()
-    proof_url = re.sub(r"/[^/]+$", "/argusgrid_proof", dev_url)
-    parts = re.match(r"postgresql(?:\+psycopg)?://([^:]+):[^@]*@([^:/]+):?(\d+)?/", dev_url)
-    if parts is None:
-        return 1
-    role, host, port = parts.group(1), parts.group(2), parts.group(3) or "5432"
-    pw_file = ROOT / ".devtools" / "pg.superuser.pw"
-    superuser_pw = pw_file.read_text(encoding="utf-8").strip() if pw_file.is_file() else ""
-    admin_url = f"postgresql://argus_super:{superuser_pw}@{host}:{port}/postgres"
-    helper = work / "db.py"
-    helper.write_text("\n".join([
-        "import psycopg, sys",
-        "url, role = sys.argv[1], sys.argv[2]",
-        "with psycopg.connect(url, autocommit=True) as c:",
-        "    c.execute('DROP DATABASE IF EXISTS argusgrid_proof WITH (FORCE)')",
-        "    c.execute('CREATE DATABASE argusgrid_proof OWNER \"' + role + '\"')",
-        "",
-    ]), encoding="utf-8")
-    r = run([str(py), "-I", str(helper), admin_url, role], work)
-    if not check("empty proof database created", r.returncode == 0, redact(r.stderr[-200:])):
-        return 1
+    # normal mode: a new empty database on the development cluster; bootstrap mode: setup installs its own
+    if args.bootstrap:
+        db_args: list[str] = []
+        tool_args = ["-EmbeddedPython"] + (["-LocalCache", str(Path(args.local_cache).resolve())] if args.local_cache else [])
+    else:
+        dev_url = (ROOT / "backend" / "data" / "database.url").read_text(encoding="utf-8").strip()
+        proof_url = re.sub(r"/[^/]+$", "/argusgrid_proof", dev_url)
+        parts = re.match(r"postgresql(?:\+psycopg)?://([^:]+):[^@]*@([^:/]+):?(\d+)?/", dev_url)
+        if parts is None:
+            return 1
+        role, host, port = parts.group(1), parts.group(2), parts.group(3) or "5432"
+        pw_file = ROOT / ".devtools" / "pg.superuser.pw"
+        superuser_pw = pw_file.read_text(encoding="utf-8").strip() if pw_file.is_file() else ""
+        admin_url = f"postgresql://argus_super:{superuser_pw}@{host}:{port}/postgres"
+        helper = work / "db.py"
+        helper.write_text("\n".join([
+            "import psycopg, sys",
+            "url, role = sys.argv[1], sys.argv[2]",
+            "with psycopg.connect(url, autocommit=True) as c:",
+            "    c.execute('DROP DATABASE IF EXISTS argusgrid_proof WITH (FORCE)')",
+            "    c.execute('CREATE DATABASE argusgrid_proof OWNER \"' + role + '\"')",
+            "",
+        ]), encoding="utf-8")
+        r = run([str(py), "-I", str(helper), admin_url, role], work)
+        if not check("empty proof database created", r.returncode == 0, redact(r.stderr[-200:])):
+            return 1
+        db_args = ["-DatabaseUrl", proof_url]
+        tool_args = []
 
     # 4. setup ------------------------------------------------------------------------------------------
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    check("check-only reports no blockers", run(["cmd", "/c", str(install / "setup.bat"), "-CheckOnly", "-DatabaseUrl", proof_url],
-                                                  install, env).returncode == 0)
-    r = run(["cmd", "/c", str(install / "setup.bat"), "-DryRun", "-DatabaseUrl", proof_url], install, env)
+    check("check-only reports no blockers",
+          run(["cmd", "/c", str(install / "setup.bat"), "-CheckOnly", *db_args, *tool_args], install, env).returncode == 0)
+    r = run(["cmd", "/c", str(install / "setup.bat"), "-DryRun", *db_args, *tool_args], install, env)
     check("dry run changes nothing and keeps the setup files",
-          r.returncode == 0 and (install / "setup.ps1").exists() and not (install / ".venv").exists())
+          r.returncode == 0 and (install / "setup.ps1").exists() and not (install / ".venv").exists()
+          and not (install / "runtime").exists())
     extra = ["-WithDemo"] if args.package == "demo" else []
-    r = run(["cmd", "/c", str(install / "setup.bat"), "-AssumeYes", "-DatabaseUrl", proof_url, *extra], install, env, timeout=1500)
+    r = run(["cmd", "/c", str(install / "setup.bat"), "-AssumeYes", *db_args, *tool_args, *extra], install, env, timeout=2400)
     check("setup succeeds", r.returncode == 0, f"exit {r.returncode}")
     if r.returncode != 0:
         print(redact(r.stdout[-3000:]), redact(r.stderr[-1500:]))
@@ -158,6 +173,24 @@ def main() -> int:
     match = re.search(r"^sysadmin\s*[:=]\s*(\S+)", accounts.read_text(encoding="utf-8"), re.M) if accounts.is_file() else None
     check("password has the generated form (not in source or documents)", bool(match) and len(match.group(1)) >= 12)
     admin_password = match.group(1) if match else ""
+
+    pg_port = 0
+    if args.bootstrap:
+        runtime = install / "runtime"
+        check("embedded Python was installed and is used (no virtual environment)",
+              (runtime / "python" / "python.exe").is_file() and not (install / ".venv").exists())
+        check("bundled PostgreSQL was unpacked without the administration tool",
+              (runtime / "pgsql" / "bin" / "postgres.exe").is_file() and not (runtime / "pgsql" / "pgAdmin 4").exists())
+        port_file = runtime / "postgres.port"
+        pg_port = int(port_file.read_text(encoding="utf-8").strip()) if port_file.is_file() else 0
+        check("cluster port is in the reserved range", 54340 <= pg_port <= 54399, str(pg_port))
+        url_file = install / "backend" / "data" / "database.url"
+        url_text = url_file.read_text(encoding="utf-8") if url_file.is_file() else ""
+        check("database URL points to the loopback address of the bundled cluster",
+              f"@127.0.0.1:{pg_port}/" in url_text)
+        conf = (runtime / "pgdata" / "postgresql.conf")
+        check("cluster files exist and the superuser password file is outside the package data folder",
+              conf.is_file() and (runtime / "postgres.superuser.pw").is_file())
 
     # 5. start (development flags set on purpose: they must be ignored, DEV-007) ------------------------
     start_env = {**env, "ARGUS_ENV": "development", "ARGUS_DEV_LOGINLESS": "1"}
@@ -206,18 +239,25 @@ def main() -> int:
     except (urllib.error.URLError, OSError):
         check("server no longer answers", True)
     check("process file removed", not (install / "backend" / "data" / "server.pid").exists())
+    if args.bootstrap:
+        import socket
+        with socket.socket() as s:
+            s.settimeout(2)
+            check("stop also ended the bundled PostgreSQL of this folder", s.connect_ex(("127.0.0.1", pg_port)) != 0)
 
     # 6. what is left behind -----------------------------------------------------------------------------
     leftovers = [p.relative_to(install).as_posix() for p in (install / "backend" / "app").rglob("__pycache__")]
     check("no bytecode caches in the application folder", not leftovers, ", ".join(leftovers[:3]))
     top = sorted(p.name for p in install.iterdir())
     allowed = {".venv", "backend", "frontend", "INSTALL.txt", "start.bat", "start.ps1", "stop.bat", "stop.ps1"}
+    if args.bootstrap:
+        allowed |= {"runtime", "bootstrap.ps1"}
     check("only the expected top-level items exist", set(top) <= allowed, ", ".join(top))
     owner = install / "backend" / "config" / "owner.sealed"
     check("sealed owner file is present and holds no plaintext secret",
           owner.is_file() and "$argon2" in owner.read_text(encoding="utf-8"))
     runtime_findings = [f for f in secret_scan.scan_tree(install, expect_owner_file=True)
-                        if not f.path.startswith((".venv", "backend/data", "backend/config/app.env"))]
+                        if not f.path.startswith((".venv", "runtime", "backend/data", "backend/config/app.env"))]
     check("installed tree (outside runtime folders) passes the scan", runtime_findings == [],
           "; ".join(str(f) for f in runtime_findings[:3]))
 
@@ -225,7 +265,8 @@ def main() -> int:
     out.mkdir(exist_ok=True)
     report = {"package": args.package, "profile": args.profile, "archive": archive.name,
               "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in RESULTS]}
-    (out / f"proof-{args.package}-{args.profile}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    suffix = "-bootstrap" if args.bootstrap else ""
+    (out / f"proof-{args.package}-{args.profile}{suffix}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     failed = [n for n, ok, _d in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)} of {len(RESULTS)} checks passed.")
     shutil.rmtree(work, ignore_errors=True)

@@ -92,6 +92,9 @@ def stage(out_dir: Path, package: str, profile: str) -> tuple[Path, str, str]:
 
     for script in ("setup.bat", "setup.ps1", "start.bat", "start.ps1", "stop.bat", "stop.ps1"):
         shutil.copy2(TEMPLATES / script, staging / script)
+    if package == "demo":
+        # AG-D-70: only the demo package can install its own Python and PostgreSQL (pinned downloads)
+        shutil.copy2(TEMPLATES / "bootstrap.ps1", staging / "bootstrap.ps1")
     (staging / "INSTALL.txt").write_text(install_text(package, profile), encoding="utf-8")
 
     # a fresh installation id for this package; the secret only goes to the console (OWN-005, OWN-006)
@@ -101,6 +104,31 @@ def stage(out_dir: Path, package: str, profile: str) -> tuple[Path, str, str]:
 
 
 def install_text(package: str, profile: str) -> str:
+    if package == "demo":
+        return f"""ArgusGrid {version()} (demo package, profile {profile})
+
+SK
+1. Spustite setup.bat. Ak nezadáte -DatabaseUrl, setup stiahne a nainštaluje PostgreSQL 16 (asi 311 MB)
+   do priečinka runtime\\ a podľa potreby vložený Python 3.12. Súbory pochádzajú z pevných adries a kontroluje sa
+   ich SHA-256. Databáza počúva iba na 127.0.0.1. Bez siete: súbory vložte do runtime\\cache alebo zadajte
+   -LocalCache <priečinok>. Voľby: -CheckOnly, -DryRun, -AssumeYes, -WithDemo, -DatabaseUrl <url>, -EmbeddedPython.
+   Po úspešnom dokončení sa setup.bat a setup.ps1 sám vymaže.
+2. Spustite start.bat (spustí aj databázu v tomto priečinku). Prihláste sa ako sysadmin, heslo sa musí hneď zmeniť.
+3. Zastavenie: stop.bat zastaví aplikáciu aj databázu z tohto priečinka (-KeepDatabase ju ponechá bežať).
+   Externá databáza sa nikdy nezastavuje. Vymazanie: stop.bat a potom zmažte celý priečinok.
+
+EN
+1. Run setup.bat. Without -DatabaseUrl the setup downloads and installs PostgreSQL 16 (about 311 MB) into
+   runtime\\ and, when needed, an embedded Python 3.12. The files come from fixed addresses and are checked against
+   pinned SHA-256 values. The database listens on 127.0.0.1 only. Offline: put the files into runtime\\cache or
+   give -LocalCache <folder>. Options: -CheckOnly, -DryRun, -AssumeYes, -WithDemo, -DatabaseUrl <url>,
+   -EmbeddedPython. After a fully successful run setup.bat and setup.ps1 delete themselves.
+2. Run start.bat (it also starts the database of this folder). Sign in as sysadmin; change the password at once.
+3. Stop with stop.bat: it stops the application and the database of this folder (-KeepDatabase leaves it running).
+   An external database is never stopped. To remove: stop.bat, then delete the whole folder.
+
+Configuration: backend\\config\\app.env (ARGUS_PROFILE civil | defense, ARGUS_BIND_HOST, ARGUS_SECURE_COOKIES).
+"""
     return f"""ArgusGrid {version()} ({package} package, profile {profile})
 
 SK
